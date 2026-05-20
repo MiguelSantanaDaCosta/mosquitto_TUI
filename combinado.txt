@@ -1,0 +1,1088 @@
+===== core/infra_service.py =====
+import re
+import subprocess
+from unittest import result
+
+class InfraFacade:
+
+    def get_connection(self, port=1883):
+        result = subprocess.run(
+                [
+                    "ss",
+                    "-t",
+                    "-a",
+                    f"sport = :{port} or dport = :{port}"
+                    ],
+                    capture_output=True,
+                    text=True
+        )
+
+        return result.stdout
+
+    def get_logs(self):
+        result = subprocess.run(
+                [
+                    "journalctl",
+                    "-u",
+                    "mosquitto",
+                    "-n",
+                    "20",
+                    "--no-pager"
+                    ],
+                capture_output=True,
+                text=True
+
+        )
+        
+        return result.stdout 
+                   
+
+
+===== core/telemetry_service.py =====
+import subprocess
+from unittest import result
+
+class TelemetryService:
+
+    def get_connection(
+        self,
+        port=1883
+    ):
+        result = subprocess.run(
+            [
+                "ss",
+                "-t",
+                "-a",
+                f"sport = :{port} or dport = :{port}"
+             ],
+            capture_output=True,
+            text=True
+         )
+
+        established = 0
+
+        for line in result.stdout.splitlines():
+            if "ESTAB" in line:
+                established += 1
+
+        return{
+                "connections": established,
+                "raw_output": result.stdout
+        }
+
+===== core/systemd_service.py =====
+import subprocess
+
+
+class SystemdService:
+
+    def execute(
+        self,
+        action: str
+    ):
+        valid_actions = {
+            "start",
+            "stop",
+            "restart",
+            "reload",
+            "reload-or-restart",
+            "status"
+        }
+
+        if action not in valid_actions:
+            raise ValueError(
+                f"Ação inválida: {action}"
+            )
+
+        result = subprocess.run(
+            [   
+                #"sudo",
+                "systemctl",
+                action,
+                "mosquitto"
+            ],
+            capture_output=True,
+            text=True
+        )
+
+        return {
+            "success":
+                result.returncode == 0,
+            "stdout":
+                result.stdout,
+            "stderr":
+                result.stderr
+        }
+
+===== core/user_service.py =====
+import subprocess
+
+
+class UserService:
+
+    PASSWD_FILE = (
+        "/etc/mosquitto/passwd_file"
+    )
+
+    def create_user(
+        self,
+        username: str,
+        password: str
+    ):
+
+        result = subprocess.run(
+            [
+                #"sudo",
+                "mosquitto_passwd",
+                "-b",
+                self.PASSWD_FILE,
+                username,
+                password
+            ],
+            capture_output=True,
+            text=True
+        )
+
+        return {
+            "success":
+                result.returncode == 0,
+            "stdout":
+                result.stdout,
+            "stderr":
+                result.stderr
+        }
+
+    def list_users(self):
+
+        users = []
+
+        try:
+            with open(
+                self.PASSWD_FILE,
+                "r"
+            ) as file:
+
+                for line in file:
+                    if ":" in line:
+                        users.append(
+                            line.split(":")[0]
+                        )
+
+        except FileNotFoundError:
+            return []
+
+        return users
+
+===== core/mqtt_manager.py =====
+import paho.mqtt.client as mqtt
+import threading
+import time
+
+
+class MQTTManager:
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+
+        if self._initialized:
+            return
+
+        self.client = mqtt.Client(
+            client_id="tui_admin"
+        )
+
+        self.observers = []
+
+        self.client.on_message = (
+            self.on_message
+        )
+
+        self.client.on_connect = (
+            self.on_connect
+        )
+
+        self.running = False
+        self._initialized = True
+
+    def connect(
+        self,
+        host="127.0.0.1",
+        port=1883
+    ):
+        self.running = True
+
+        def worker():
+
+            while self.running:
+
+                try:
+                    self.client.connect(
+                        host,
+                        port,
+                        60
+                    )
+
+                    self.client.loop_forever()
+
+                except Exception as e:
+                    print(
+                        f"MQTT Error: {e}"
+                    )
+
+                    time.sleep(2)
+
+        threading.Thread(
+            target=worker,
+            daemon=True
+        ).start()
+
+    def stop(self):
+        self.running = False
+
+        try:
+            self.client.disconnect()
+        except Exception:
+            pass
+
+    def subscribe(
+        self,
+        topic="#"
+    ):
+        self.client.subscribe(
+            topic
+        )
+
+    def publish(
+        self,
+        topic,
+        payload
+    ):
+        self.client.publish(
+            topic,
+            payload
+        )
+
+    def register(
+        self,
+        observer
+    ):
+        self.observers.append(
+            observer
+        )
+
+    def notify(
+        self,
+        message
+    ):
+        for observer in self.observers:
+            observer.update(
+                message
+            )
+
+    def on_connect(
+        self,
+        client,
+        userdata,
+        flags,
+        rc
+    ):
+        if rc == 0:
+            self.subscribe("#")
+
+    def on_message(
+        self,
+        client,
+        userdata,
+        msg
+    ):
+        try:
+            payload = (
+                msg.payload.decode(
+                    "utf-8"
+                )
+            )
+
+        except Exception:
+            payload = str(
+                msg.payload
+            )
+
+        data = {
+            "topic":
+                msg.topic,
+
+            "payload":
+                payload,
+
+            "timestamp":
+                time.strftime(
+                    "%H:%M:%S"
+                )
+        }
+
+        self.notify(
+            data
+        )
+
+===== patterns/observer.py =====
+from abc import ABC, abstractmethod
+
+
+class Observer(ABC):
+
+    @abstractmethod
+    def update(
+        self,
+        data
+    ):
+        pass
+
+===== patterns/commands.py =====
+from abc import (
+    ABC,
+    abstractmethod
+)
+import subprocess
+
+
+class Command(ABC):
+
+    @abstractmethod
+    def execute(self):
+        pass
+
+
+class StartMosquitto(Command):
+
+    def execute(self):
+        subprocess.run(
+            [
+                "systemctl",
+                "start",
+                "mosquitto"
+            ]
+        )
+
+
+class StopMosquitto(Command):
+
+    def execute(self):
+        subprocess.run(
+            [
+                "systemctl",
+                "stop",
+                "mosquitto"
+            ]
+        )
+
+
+class RestartMosquitto(
+    Command
+):
+
+    def execute(self):
+        subprocess.run(
+            [
+                "systemctl",
+                "restart",
+                "mosquitto"
+            ]
+        )
+
+
+        
+
+
+===== patterns/factory.py =====
+import re
+from textual.widgets import (
+    Log,
+    TabPane
+)
+
+
+class TopicTabFactory:
+
+    @staticmethod
+    def create(topic):
+
+        safe_id = re.sub(
+            r"[^a-zA-Z0-9]",
+            "-",
+            topic
+        )
+
+        pane = TabPane(
+            f"📁 {topic}",
+            id=f"tab-{safe_id}"
+        )
+
+        log = Log(
+            id=f"log-{safe_id}",
+            highlight=True
+        )
+
+        return pane, log
+
+===== patterns/strategies.py =====
+import json
+from abc import (
+    ABC,
+    abstractmethod
+)
+
+
+class PayloadStrategy(ABC):
+
+    @abstractmethod
+    def parse(self, payload):
+        pass
+
+
+class JsonStrategy(PayloadStrategy):
+
+    def parse(self, payload):
+        return json.loads(payload)
+
+
+class TextStrategy(PayloadStrategy):
+
+    def parse(self, payload):
+        return payload
+
+
+class PayloadParser:
+
+    @staticmethod
+    def get_strategy(payload):
+
+        if payload.strip().startswith(
+            ("{", "[")
+        ):
+            return JsonStrategy()
+
+        return TextStrategy()
+
+===== ui/widgets.py =====
+from textual.widgets import Log
+
+
+def create_log_widget(
+    widget_id
+):
+    widget = Log(
+        id=widget_id,
+        highlight=True
+    )
+
+    widget.styles.height = "1fr"
+
+    return widget
+
+===== ui/dynamic_tabs.py =====
+from patterns.factory import (
+    TopicTabFactory
+)
+
+
+class DynamicTabManager:
+
+    def __init__(self):
+        self.topics = set()
+
+    async def create_topic_tab(
+        self,
+        tabs,
+        topic
+    ):
+        if topic in self.topics:
+            return
+
+        self.topics.add(topic)
+
+        pane, log = (
+            TopicTabFactory.create(
+                topic
+            )
+        )
+
+        await tabs.add_pane(
+            pane
+        )
+
+        await pane.mount(
+            log
+        )
+
+===== ui/main_screen.py =====
+from textual.app import (
+    App,
+    ComposeResult
+)
+
+from textual.containers import (
+    Horizontal,
+    Vertical
+)
+
+from textual.widgets import (
+    Header,
+    Footer,
+    Button,
+    Input,
+    Label,
+    Log,
+    TabbedContent,
+    TabPane
+)
+
+#from patterns.observer import Observer
+from core.mqtt_manager import MQTTManager
+from core.infra_service import InfraFacade
+from core.systemd_service import SystemdService
+from core.user_service import UserService
+from core.telemetry_service import (
+    TelemetryService
+)
+from ui.dynamic_tabs import (
+    DynamicTabManager
+)
+from patterns.strategies import (
+    PayloadParser
+)
+
+
+class MosquittoTUI(
+    App,
+    #Observer
+):
+
+    CSS = """
+    Screen {
+        background: #24273a;
+    }
+
+    TabbedContent {
+        margin: 1;
+    }
+
+    Log {
+        border: solid #8aadf4;
+        height: 1fr;
+    }
+
+    Input {
+        margin-bottom: 1;
+    }
+
+    Button {
+        margin-right: 1;
+    }
+    """
+
+    BINDINGS = [
+        ("q", "quit", "Quit"),
+        ("c", "clear_logs", "Clear")
+    ]
+
+    def __init__(self):
+        super().__init__()
+
+        self.mqtt = MQTTManager()
+        self.mqtt.register(self)
+
+        self.infra = InfraFacade()
+        self.systemd = (
+            SystemdService()
+        )
+
+        self.user_service = (
+            UserService()
+        )
+
+        self.telemetry = (
+            TelemetryService()
+        )
+
+        self.dynamic_tabs = (
+            DynamicTabManager()
+        )
+
+    def compose(
+        self
+    ) -> ComposeResult:
+
+        yield Header(
+            show_clock=True
+        )
+
+        with TabbedContent(
+            id="tabs-main"
+        ):
+
+            with TabPane(
+                "📊 Infraestrutura",
+                id="tab-infra"
+            ):
+                yield Log(
+                    id="log-infra"
+                )
+
+                yield Button(
+                    "Atualizar",
+                    id="btn-refresh"
+                )
+
+            with TabPane(
+                "📡 MQTT",
+                id="tab-mqtt"
+            ):
+                yield Log(
+                    id="log-mqtt"
+                )
+
+            with TabPane(
+                "📤 Publicar",
+                id="tab-publish"
+            ):
+                yield Label(
+                    "Tópico"
+                )
+
+                yield Input(
+                    placeholder="sensores/temp",
+                    id="input-topic"
+                )
+
+                yield Label(
+                    "Payload"
+                )
+
+                yield Input(
+                    placeholder='{"temp": 20}',
+                    id="input-payload"
+                )
+
+                yield Button(
+                    "Publicar",
+                    id="btn-publish"
+                )
+
+                yield Log(
+                    id="log-publish"
+                )
+
+            with TabPane(
+                "⚙ Servidor",
+                id="tab-server"
+            ):
+
+                with Horizontal():
+
+                    yield Button(
+                        "Start",
+                        id="btn-start"
+                    )
+
+                    yield Button(
+                        "Stop",
+                        id="btn-stop"
+                    )
+
+                    yield Button(
+                        "Restart",
+                        id="btn-restart"
+                    )
+
+                    yield Button(
+                        "Logs",
+                        id="btn-logs"
+                    )
+
+                yield Log(
+                    id="log-server"
+                )
+
+            with TabPane(
+                "👥 Usuários",
+                id="tab-users"
+            ):
+
+                yield Input(
+                    placeholder="username",
+                    id="input-user"
+                )
+
+                yield Input(
+                    placeholder="password",
+                    password=True,
+                    id="input-password"
+                )
+
+                yield Button(
+                    "Cadastrar",
+                    id="btn-user"
+                )
+
+                yield Log(
+                    id="log-users"
+                )
+
+        yield Footer()
+
+    def on_mount(self):
+
+        self.mqtt.connect()
+
+        self.refresh_infra()
+
+    def update(
+        self,
+        data
+    ):
+        self.call_from_thread(
+            self.process_message,
+            data
+        )
+
+    async def process_message(
+        self,
+        data
+    ):
+        topic = data["topic"]
+        payload = data["payload"]
+        timestamp = data[
+            "timestamp"
+        ]
+
+        log = self.query_one(
+            "#log-mqtt",
+            Log
+        )
+
+        strategy = (
+            PayloadParser
+            .get_strategy(
+                payload
+            )
+        )
+
+        try:
+            parsed = (
+                strategy.parse(
+                    payload
+                )
+            )
+
+            log.write_line(
+                f"[{timestamp}] "
+                f"{topic} -> "
+                f"{parsed}"
+            )
+
+        except Exception:
+            log.write_line(
+                f"[{timestamp}] "
+                f"{topic} -> "
+                f"{payload}"
+            )
+
+        tabs = self.query_one(
+            "#tabs-main",
+            TabbedContent
+        )
+
+        await (
+            self.dynamic_tabs
+            .create_topic_tab(
+                tabs,
+                topic
+            )
+        )
+
+        safe_topic = (
+            topic.replace(
+                "/",
+                "-"
+            )
+        )
+
+        try:
+            topic_log = (
+                self.query_one(
+                    f"#log-{safe_topic}",
+                    Log
+                )
+            )
+
+            topic_log.write_line(
+                f"[{timestamp}] "
+                f"{payload}"
+            )
+
+        except Exception:
+            pass
+
+    def on_button_pressed(
+        self,
+        event:
+        Button.Pressed
+    ):
+
+        button_id = (
+            event.button.id
+        )
+
+        if button_id == (
+            "btn-publish"
+        ):
+            self.publish_message()
+
+        elif button_id == (
+            "btn-refresh"
+        ):
+            self.refresh_infra()
+
+        elif button_id == (
+            "btn-start"
+        ):
+            self.run_systemctl(
+                "start"
+            )
+
+        elif button_id == (
+            "btn-stop"
+        ):
+            self.run_systemctl(
+                "stop"
+            )
+
+        elif button_id == (
+            "btn-restart"
+        ):
+            self.run_systemctl(
+                "restart"
+            )
+
+        elif button_id == (
+            "btn-logs"
+        ):
+            self.load_logs()
+
+        elif button_id == (
+            "btn-user"
+        ):
+            self.create_user()
+
+    def publish_message(
+        self
+    ):
+        topic = (
+            self.query_one(
+                "#input-topic",
+                Input
+            ).value
+        )
+
+        payload = (
+            self.query_one(
+                "#input-payload",
+                Input
+            ).value
+        )
+
+        log = self.query_one(
+            "#log-publish",
+            Log
+        )
+
+        if not topic or not payload:
+            log.write_line(
+                "Topic/Payload inválido"
+            )
+            return
+
+        self.mqtt.publish(
+            topic,
+            payload
+        )
+
+        log.write_line(
+            f"Publicado: "
+            f"{topic}"
+        )
+
+    def refresh_infra(
+        self
+    ):
+        log = self.query_one(
+            "#log-infra",
+            Log
+        )
+
+        log.clear()
+
+        telemetry = (
+            self.telemetry
+            .get_connection()
+        )
+
+        log.write_line(
+            f"Conexões: "
+            f"{telemetry['connections']}"
+        )
+
+        log.write(
+            telemetry[
+                "raw_output"
+            ]
+        )
+
+    def run_systemctl(
+        self,
+        action
+    ):
+        log = self.query_one(
+            "#log-server",
+            Log
+        )
+
+        result = (
+            self.systemd
+            .execute(action)
+        )
+
+        if result[
+            "success"
+        ]:
+            log.write_line(
+                f"OK: {action}"
+            )
+        else:
+            log.write_line(
+                result[
+                    "stderr"
+                ]
+            )
+
+    def load_logs(
+        self
+    ):
+        log = self.query_one(
+            "#log-server",
+            Log
+        )
+
+        log.clear()
+
+        logs = (
+            self.infra
+            .get_logs()
+        )
+
+        log.write(logs)
+
+    def create_user(
+        self
+    ):
+        username = (
+            self.query_one(
+                "#input-user",
+                Input
+            ).value
+        )
+
+        password = (
+            self.query_one(
+                "#input-password",
+                Input
+            ).value
+        )
+
+        log = self.query_one(
+            "#log-users",
+            Log
+        )
+
+        result = (
+            self.user_service
+            .create_user(
+                username,
+                password
+            )
+        )
+
+        if result[
+            "success"
+        ]:
+            log.write_line(
+                f"Usuário "
+                f"{username} "
+                f"criado."
+            )
+        else:
+            log.write_line(
+                result[
+                    "stderr"
+                ]
+            )
+
+    def action_clear_logs(
+        self
+    ):
+        try:
+            active_tab = (
+                self.query_one(
+                    "#tabs-main",
+                    TabbedContent
+                ).active
+            )
+
+            if active_tab:
+                for log in (
+                    self.query(
+                        Log
+                    )
+                ):
+                    log.clear()
+
+        except Exception:
+            pass
+
+===== models/message.py =====
+from dataclasses import dataclass
+
+
+@dataclass
+class MQTTMessage:
+    topic: str
+    payload: str
+    timestamp: str
+
+===== app.py =====
+import os
+import sys
+from ui.main_screen import MosquittoTUI
+
+if __name__ == "__main__":
+    # Verifica se o script está rodando como root (UID 0)
+    if os.geteuid() != 0:
+        print("🔑 Esta aplicação precisa de privilégios para gerenciar o Mosquitto.")
+        
+        # O os.execvp substitui o processo atual pelo comando sudo.
+        # Usamos '-E' para preservar o ambiente Python (encontrando o Textual)
+        # sys.executable é o caminho do Python atual
+        # sys.argv são os argumentos que você passou pro script
+        os.execvp("sudo", ["sudo", "-E", sys.executable] + sys.argv)
+
+    # Se o código chegou até aqui, significa que a senha foi aceita
+    # e o processo já é root. Agora podemos iniciar a TUI com segurança.
+    app = MosquittoTUI()
+    app.run()
+
