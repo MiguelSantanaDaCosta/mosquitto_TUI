@@ -4,7 +4,7 @@ import subprocess
 class UserService:
 
     PASSWD_FILE = (
-        "/etc/mosquitto/passwd_file"
+       "/etc/mosquitto/passwd" 
     )
 
     def create_user(
