@@ -1,6 +1,22 @@
-import paho.mqtt.client as mqtt
+import os
 import threading
 import time
+import paho.mqtt.client as mqtt
+
+
+ENV_MAP = {
+    "host": ("MQTTUI_BROKER_HOST", "127.0.0.1"),
+    "port": ("MQTTUI_BROKER_PORT", "1883"),
+    "username": ("MQTTUI_USERNAME", None),
+    "password": ("MQTTUI_PASSWORD", None),
+    "client_id": ("MQTTUI_CLIENTID", "tui_admin"),
+    "topic_filter": ("MQTTUI_TOPIC_FILTER", "#"),
+    "tls_enabled": ("MQTTUI_TLS", "false"),
+    "tls_ca_cert": ("MQTTUI_TLS_CA_CERT", None),
+    "tls_cert": ("MQTTUI_TLS_CERT", None),
+    "tls_key": ("MQTTUI_TLS_KEY", None),
+    "tls_insecure": ("MQTTUI_TLS_INSECURE", "false"),
+}
 
 
 class MQTTManager:
@@ -13,143 +29,157 @@ class MQTTManager:
         return cls._instance
 
     def __init__(self):
-
         if self._initialized:
             return
-
+        self.config = self._load_config()
         self.client = mqtt.Client(
-            client_id="tui_admin"
+            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+            client_id=self.config["client_id"],
+            protocol=mqtt.MQTTv311
         )
-
         self.observers = []
-
-        self.client.on_message = (
-            self.on_message
-        )
-
-        self.client.on_connect = (
-            self.on_connect
-        )
-
+        self.on_state_change = None
+        self.client.on_message = self.on_message
+        self.client.on_connect = self.on_connect
+        self.client.on_disconnect = self.on_disconnect
         self.running = False
+        self.connected = False
+        self.last_error = None
         self._initialized = True
 
-    def connect(
-        self,
-        host="127.0.0.1",
-        port=1883
-    ):
+    def _load_config(self) -> dict:
+        def env(key):
+            var, default = ENV_MAP[key]
+            val = os.environ.get(var)
+            return val if val is not None else default
+
+        port = int(env("port"))
+        return {
+            "host": env("host"),
+            "port": port,
+            "username": env("username"),
+            "password": env("password"),
+            "client_id": env("client_id"),
+            "topic_filter": env("topic_filter"),
+            "tls_enabled": env("tls_enabled").lower() == "true",
+            "tls_ca_cert": env("tls_ca_cert"),
+            "tls_cert": env("tls_cert"),
+            "tls_key": env("tls_key"),
+            "tls_insecure": env("tls_insecure").lower() == "true",
+        }
+
+    def _setup_tls(self):
+        cfg = self.config
+        if not cfg["tls_enabled"]:
+            return
+        ca_cert = cfg["tls_ca_cert"]
+        cert = cfg["tls_cert"]
+        key = cfg["tls_key"]
+        if cert and key:
+            if ca_cert:
+                self.client.tls_set(ca_certs=ca_cert, certfile=cert, keyfile=key)
+            else:
+                self.client.tls_set(certfile=cert, keyfile=key)
+        elif ca_cert:
+            self.client.tls_set(ca_certs=ca_cert)
+        else:
+            self.client.tls_set()
+        if cfg["tls_insecure"]:
+            self.client.tls_insecure_set(True)
+
+    def _notify_state(self):
+        if self.on_state_change:
+            try:
+                self.on_state_change(self.connected, self.last_error)
+            except Exception:
+                pass
+
+    def connect(self, host=None, port=None):
+        cfg = self.config
+        if host is not None:
+            cfg["host"] = host
+        if port is not None:
+            cfg["port"] = port
         self.running = True
+        self._setup_tls()
+        if cfg["username"] and cfg["password"]:
+            self.client.username_pw_set(cfg["username"], cfg["password"])
 
         def worker():
-
             while self.running:
-
                 try:
-                    self.client.connect(
-                        host,
-                        port,
-                        60
-                    )
-
+                    self.last_error = None
+                    self._notify_state()
+                    self.client.connect(cfg["host"], cfg["port"], 60)
                     self.client.loop_forever()
-
                 except Exception as e:
-                    print(
-                        f"MQTT Error: {e}"
-                    )
-
+                    self.last_error = str(e)
+                    self.connected = False
+                    self._notify_state()
                     time.sleep(2)
 
-        threading.Thread(
-            target=worker,
-            daemon=True
-        ).start()
+        threading.Thread(target=worker, daemon=True).start()
 
     def stop(self):
         self.running = False
-
+        self.connected = False
         try:
             self.client.disconnect()
         except Exception:
             pass
 
-    def subscribe(
-        self,
-        topic="#"
-    ):
-        self.client.subscribe(
-            topic
-        )
+    def subscribe(self, topic=None):
+        if topic is None:
+            topic = self.config["topic_filter"]
+        self.client.subscribe(topic)
 
-    def publish(
-        self,
-        topic,
-        payload
-    ):
-        self.client.publish(
-            topic,
-            payload
-        )
+    def publish(self, topic, payload, retain=False):
+        self.client.publish(topic, payload, retain=retain)
 
-    def register(
-        self,
-        observer
-    ):
-        self.observers.append(
-            observer
-        )
+    def register(self, observer):
+        self.observers.append(observer)
 
-    def notify(
-        self,
-        message
-    ):
+    def notify(self, message):
         for observer in self.observers:
-            observer.update(
-                message
-            )
+            try:
+                observer.update(message)
+            except Exception:
+                pass
 
-    def on_connect(
-        self,
-        client,
-        userdata,
-        flags,
-        rc
-    ):
+    def on_connect(self, client, userdata, flags, rc):
         if rc == 0:
-            self.subscribe("#")
+            self.connected = True
+            self.last_error = None
+            self.subscribe()
+        else:
+            reasons = {
+                1: "Conexão recusada: protocolo não compatível",
+                2: "Conexão recusada: client-id inválido",
+                3: "Conexão recusada: servidor indisponível",
+                4: "Conexão recusada: usuário ou senha inválidos",
+                5: "Conexão recusada: não autorizado",
+            }
+            self.last_error = reasons.get(rc, f"Erro de conexão: código {rc}")
+        self._notify_state()
 
-    def on_message(
-        self,
-        client,
-        userdata,
-        msg
-    ):
+    def on_disconnect(self, client, userdata, rc):
+        self.connected = False
+        if rc != 0:
+            self.last_error = "Conexão perdida com o broker"
+        else:
+            self.last_error = None
+        self._notify_state()
+
+    def on_message(self, client, userdata, msg):
         try:
-            payload = (
-                msg.payload.decode(
-                    "utf-8"
-                )
-            )
-
+            payload = msg.payload.decode("utf-8")
         except Exception:
-            payload = str(
-                msg.payload
-            )
-
+            payload = str(msg.payload)
         data = {
-            "topic":
-                msg.topic,
-
-            "payload":
-                payload,
-
-            "timestamp":
-                time.strftime(
-                    "%H:%M:%S"
-                )
+            "topic": msg.topic,
+            "payload": payload,
+            "timestamp": time.strftime("%H:%M:%S"),
+            "retain": msg.retain,
+            "qos": msg.qos,
         }
-
-        self.notify(
-            data
-        )
+        self.notify(data)
