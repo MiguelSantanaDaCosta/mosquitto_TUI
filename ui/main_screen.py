@@ -18,13 +18,13 @@ from patterns.strategies import PayloadParser
 class MosquittoTUI(App):
     CSS = """
     Screen {
-        background: #24273a;
+        background: #000000;
     }
     TabbedContent {
         margin: 1;
     }
     Log {
-        border: solid #8aadf4;
+        border: solid #4F4F4F;
     }
     Input {
         margin-bottom: 1;
@@ -34,7 +34,7 @@ class MosquittoTUI(App):
     }
     #topic-tree {
         height: 1fr;
-        border: solid #8aadf4;
+        border: solid #4F4F4F;
     }
     #search-input {
         margin: 0 0 1 0;
@@ -71,7 +71,7 @@ class MosquittoTUI(App):
     }
     #detail-topic {
         background: #363a4f;
-        color: #8aadf4;
+        color: #BC8F8F;
         text-style: bold;
         padding: 0 1;
         height: 1;
