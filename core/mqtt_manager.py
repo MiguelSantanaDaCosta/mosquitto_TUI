@@ -146,8 +146,8 @@ class MQTTManager:
             except Exception:
                 pass
 
-    def on_connect(self, client, userdata, flags, rc):
-        if rc == 0:
+    def on_connect(self, client, userdata, flags, reason_code, properties):
+        if reason_code == 0:
             self.connected = True
             self.last_error = None
             self.subscribe()
@@ -159,12 +159,12 @@ class MQTTManager:
                 4: "Conexão recusada: usuário ou senha inválidos",
                 5: "Conexão recusada: não autorizado",
             }
-            self.last_error = reasons.get(rc, f"Erro de conexão: código {rc}")
+            self.last_error = reasons.get(reason_code, f"Erro de conexão: código {reason_code}")
         self._notify_state()
 
-    def on_disconnect(self, client, userdata, rc):
+    def on_disconnect(self, client, userdata, reason_code, properties):
         self.connected = False
-        if rc != 0:
+        if reason_code != 0:
             self.last_error = "Conexão perdida com o broker"
         else:
             self.last_error = None
